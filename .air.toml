@@ -1,0 +1,10 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+    cmd = "go build -o ./tmp/server ./cmd/server"
+    bin = "./tmp/server"
+    delay = 1000
+    exclude_dir = ["tmp", "vendor", "docker", "scripts"]
+    exclude_regex = ["_test.go"]
+    include_ext = ["go", "toml", "yaml"]
