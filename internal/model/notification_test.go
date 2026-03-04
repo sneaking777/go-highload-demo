@@ -5,6 +5,7 @@ import (
 	"time"
 )
 
+// TestNotificationStatus_IsValid проверяет валидацию допустимых и недопустимых статусов уведомления.
 func TestNotificationStatus_IsValid(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -28,6 +29,7 @@ func TestNotificationStatus_IsValid(t *testing.T) {
 	}
 }
 
+// TestChannel_IsValid проверяет валидацию допустимых и недопустимых каналов доставки.
 func TestChannel_IsValid(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -51,6 +53,7 @@ func TestChannel_IsValid(t *testing.T) {
 	}
 }
 
+// TestNotification_Validate проверяет валидацию полей уведомления: userID, channel, payload.
 func TestNotification_Validate(t *testing.T) {
 	valid := Notification{
 		UserID:  "user-123",
@@ -89,6 +92,7 @@ func TestNotification_Validate(t *testing.T) {
 	})
 }
 
+// TestNotification_NewNotification проверяет фабричную функцию: генерация ID, начальный статус, временные метки.
 func TestNotification_NewNotification(t *testing.T) {
 	n := NewNotification("user-1", ChannelSMS, `{"phone":"+7999"}`)
 
@@ -109,6 +113,7 @@ func TestNotification_NewNotification(t *testing.T) {
 	}
 }
 
+// TestNotification_MarkProcessing проверяет переход в статус processing и обновление UpdatedAt.
 func TestNotification_MarkProcessing(t *testing.T) {
 	n := NewNotification("user-1", ChannelEmail, `{"to":"a@b.com"}`)
 	before := n.UpdatedAt
@@ -124,6 +129,7 @@ func TestNotification_MarkProcessing(t *testing.T) {
 	}
 }
 
+// TestNotification_MarkSent проверяет переход в статус sent.
 func TestNotification_MarkSent(t *testing.T) {
 	n := NewNotification("user-1", ChannelPush, `{"token":"abc"}`)
 	n.MarkSent()
@@ -133,6 +139,7 @@ func TestNotification_MarkSent(t *testing.T) {
 	}
 }
 
+// TestNotification_MarkFailed проверяет переход в статус failed, сохранение ошибки и инкремент счётчика попыток.
 func TestNotification_MarkFailed(t *testing.T) {
 	n := NewNotification("user-1", ChannelWebhook, `{"url":"http://example.com"}`)
 	n.MarkFailed("connection timeout")
