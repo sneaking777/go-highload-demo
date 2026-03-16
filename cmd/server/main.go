@@ -7,14 +7,17 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/go-highload-demo/internal/app"
 	"github.com/go-highload-demo/internal/config"
 	"github.com/go-highload-demo/internal/repository"
+	"github.com/go-highload-demo/internal/service"
 	"github.com/go-highload-demo/internal/storage"
+	"github.com/go-highload-demo/pkg/ratelimiter"
 )
 
-// noopLimiter — заглушка rate limiter до подключения Redis.
+// noopLimiter — заглушка rate limiter при отсутствии Redis.
 type noopLimiter struct{}
 
 // Allow всегда разрешает запрос.
@@ -30,13 +33,16 @@ func main() {
 	}
 
 	ctx := context.Background()
-	store, closeFn := initStore(ctx, cfg)
-	if closeFn != nil {
-		defer closeFn()
+	store, closeStore := initStore(ctx, cfg)
+	if closeStore != nil {
+		defer closeStore()
 	}
 
 	repo := repository.New(store)
-	limiter := &noopLimiter{} // TODO: заменить на ratelimiter.New(redisClient, ...)
+	limiter, closeRedis := initLimiter(ctx, cfg)
+	if closeRedis != nil {
+		defer closeRedis()
+	}
 
 	a := app.New(cfg, repo, limiter)
 	addr, err := a.Start()
@@ -79,4 +85,21 @@ func initStore(ctx context.Context, cfg *config.Config) (repository.Store, func(
 	log.Println("postgres connected, migrations applied")
 
 	return pg, pg.Close
+}
+
+// initLimiter создаёт rate limiter: Redis если REDIS_ADDR задан, иначе noop.
+func initLimiter(ctx context.Context, cfg *config.Config) (service.RateLimiter, func()) {
+	if cfg.Redis.Addr == "" {
+		log.Println("REDIS_ADDR not set, rate limiting disabled")
+		return &noopLimiter{}, nil
+	}
+
+	adapter := ratelimiter.NewRedisAdapter(cfg.Redis.Addr)
+	if err := adapter.Ping(ctx); err != nil {
+		log.Fatalf("redis: %v", err)
+	}
+	log.Println("redis connected, rate limiting enabled")
+
+	limiter := ratelimiter.New(adapter, int64(cfg.RateLimit.RPS), time.Second)
+	return limiter, func() { adapter.Close() }
 }
