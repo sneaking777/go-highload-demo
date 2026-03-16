@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"sync"
+	"time"
 
 	"github.com/go-highload-demo/internal/broker"
 	"github.com/go-highload-demo/internal/config"
@@ -15,6 +16,7 @@ import (
 	"github.com/go-highload-demo/internal/model"
 	"github.com/go-highload-demo/internal/sender"
 	"github.com/go-highload-demo/internal/service"
+	"github.com/go-highload-demo/pkg/retry"
 )
 
 // App объединяет все компоненты сервиса и управляет HTTP-сервером и брокером.
@@ -36,6 +38,13 @@ func New(cfg *config.Config, repo service.Repository, limiter service.RateLimite
 	svc.RegisterSender(model.ChannelPush, sender.NewPushSender())
 	svc.RegisterSender(model.ChannelSMS, sender.NewSMSSender())
 	svc.RegisterSender(model.ChannelWebhook, sender.NewWebhookSender())
+
+	svc.SetRetryConfig(retry.Config{
+		MaxAttempts: cfg.Retry.MaxAttempts,
+		BaseDelay:   100 * time.Millisecond,
+		MaxDelay:    5 * time.Second,
+		Multiplier:  2.0,
+	})
 
 	h := handler.New(svc)
 

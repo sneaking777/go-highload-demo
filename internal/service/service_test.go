@@ -5,8 +5,10 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-highload-demo/internal/model"
+	"github.com/go-highload-demo/pkg/retry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -97,6 +99,29 @@ func (m *mockSender) sentCount() int {
 	return len(m.sent)
 }
 
+// flakySender — sender, который сбоит первые failCount раз, потом работает.
+type flakySender struct {
+	mu        sync.Mutex
+	failCount int
+	callCount int
+}
+
+func (m *flakySender) Send(ctx context.Context, n *model.Notification) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.callCount++
+	if m.callCount <= m.failCount {
+		return errors.New("transient error")
+	}
+	return nil
+}
+
+func (m *flakySender) calls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.callCount
+}
+
 // mockRateLimiter имитирует rate limiter для тестов.
 type mockRateLimiter struct {
 	allowed bool
@@ -109,16 +134,25 @@ func (m *mockRateLimiter) Allow(ctx context.Context, key string) (bool, error) {
 
 // mockPublisher имитирует брокер для тестов.
 type mockPublisher struct {
+	mu        sync.Mutex
 	published []*model.Notification
 	err       error
 }
 
 func (m *mockPublisher) Publish(ctx context.Context, n *model.Notification) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.err != nil {
 		return m.err
 	}
 	m.published = append(m.published, n)
 	return nil
+}
+
+func (m *mockPublisher) count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.published)
 }
 
 // --- Тесты Send (save + publish) ---
@@ -134,7 +168,7 @@ func TestSend_SavesAndPublishes(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, model.StatusPending, repo.getStatus(n.ID))
-	assert.Len(t, pub.published, 1)
+	assert.Equal(t, 1, pub.count())
 }
 
 // TestSend_SaveError проверяет проброс ошибки при сбое сохранения.
@@ -148,7 +182,7 @@ func TestSend_SaveError(t *testing.T) {
 	err := svc.Send(context.Background(), n)
 
 	assert.Error(t, err)
-	assert.Empty(t, pub.published)
+	assert.Equal(t, 0, pub.count())
 }
 
 // TestSend_PublishError проверяет проброс ошибки при сбое публикации.
@@ -202,7 +236,6 @@ func TestProcess_RateLimited(t *testing.T) {
 func TestProcess_SenderNotFound(t *testing.T) {
 	repo := newMockRepository()
 	svc := New(repo, &mockRateLimiter{allowed: true}, &mockPublisher{})
-	// не регистрируем sender
 
 	ctx := context.Background()
 	n := model.NewNotification("user:1", model.ChannelEmail, "hello")
@@ -243,6 +276,101 @@ func TestProcess_RateLimiterError(t *testing.T) {
 	svc.ProcessNotification(ctx, n)
 
 	assert.Equal(t, model.StatusFailed, repo.getStatus(n.ID))
+}
+
+// --- Тесты Retry ---
+
+// TestProcess_RetrySuccess проверяет, что при transient-ошибке retry повторяет и доставляет.
+func TestProcess_RetrySuccess(t *testing.T) {
+	repo := newMockRepository()
+	sndr := &flakySender{failCount: 2} // сбой 2 раза, 3-й успех
+	svc := New(repo, &mockRateLimiter{allowed: true}, &mockPublisher{})
+	svc.RegisterSender(model.ChannelEmail, sndr)
+	svc.SetRetryConfig(retry.Config{
+		MaxAttempts: 3,
+		BaseDelay:   time.Millisecond,
+		MaxDelay:    10 * time.Millisecond,
+	})
+
+	ctx := context.Background()
+	n := model.NewNotification("user:1", model.ChannelEmail, "hello")
+	_ = repo.Save(ctx, n)
+
+	svc.ProcessNotification(ctx, n)
+
+	assert.Equal(t, model.StatusSent, repo.getStatus(n.ID))
+	assert.Equal(t, 3, sndr.calls())
+}
+
+// TestProcess_RetryExhausted проверяет, что при исчерпании попыток статус — failed.
+func TestProcess_RetryExhausted(t *testing.T) {
+	repo := newMockRepository()
+	sndr := &flakySender{failCount: 10} // всегда сбоит
+	svc := New(repo, &mockRateLimiter{allowed: true}, &mockPublisher{})
+	svc.RegisterSender(model.ChannelEmail, sndr)
+	svc.SetRetryConfig(retry.Config{
+		MaxAttempts: 3,
+		BaseDelay:   time.Millisecond,
+		MaxDelay:    10 * time.Millisecond,
+	})
+
+	ctx := context.Background()
+	n := model.NewNotification("user:1", model.ChannelEmail, "hello")
+	_ = repo.Save(ctx, n)
+
+	svc.ProcessNotification(ctx, n)
+
+	assert.Equal(t, model.StatusFailed, repo.getStatus(n.ID))
+	assert.Equal(t, 3, sndr.calls()) // ровно 3 попытки
+}
+
+// --- Тесты Fan-out ---
+
+// TestSendAll_FanOut проверяет параллельную отправку в несколько каналов.
+func TestSendAll_FanOut(t *testing.T) {
+	repo := newMockRepository()
+	pub := &mockPublisher{}
+	svc := New(repo, &mockRateLimiter{allowed: true}, pub)
+
+	channels := []model.Channel{model.ChannelEmail, model.ChannelPush, model.ChannelSMS}
+	ids, err := svc.SendAll(context.Background(), "user:1", channels, "fan-out test")
+
+	require.NoError(t, err)
+	assert.Len(t, ids, 3)
+	assert.Equal(t, 3, pub.count())
+
+	// Каждый ID уникален
+	unique := make(map[string]bool)
+	for _, id := range ids {
+		unique[id] = true
+	}
+	assert.Len(t, unique, 3)
+}
+
+// TestSendAll_PartialFailure проверяет, что fan-out возвращает ошибку при сбое save.
+func TestSendAll_PartialFailure(t *testing.T) {
+	repo := newMockRepository()
+	repo.saveErr = errors.New("db down")
+	pub := &mockPublisher{}
+	svc := New(repo, &mockRateLimiter{allowed: true}, pub)
+
+	channels := []model.Channel{model.ChannelEmail, model.ChannelPush}
+	ids, err := svc.SendAll(context.Background(), "user:1", channels, "test")
+
+	assert.Error(t, err)
+	assert.Empty(t, ids)
+}
+
+// TestSendAll_SingleChannel проверяет, что fan-out с одним каналом работает как Send.
+func TestSendAll_SingleChannel(t *testing.T) {
+	repo := newMockRepository()
+	pub := &mockPublisher{}
+	svc := New(repo, &mockRateLimiter{allowed: true}, pub)
+
+	ids, err := svc.SendAll(context.Background(), "user:1", []model.Channel{model.ChannelWebhook}, "test")
+
+	require.NoError(t, err)
+	assert.Len(t, ids, 1)
 }
 
 // --- Тесты GetByID ---

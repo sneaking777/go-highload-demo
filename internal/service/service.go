@@ -4,8 +4,10 @@ package service
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/go-highload-demo/internal/model"
+	"github.com/go-highload-demo/pkg/retry"
 )
 
 // Repository определяет интерфейс хранилища, используемого сервисом.
@@ -32,12 +34,13 @@ type Publisher interface {
 
 // NotificationService координирует отправку уведомлений:
 // сохранение в репозиторий, публикацию в очередь (broker),
-// асинхронную проверку лимитов, отправку и обновление статуса.
+// асинхронную проверку лимитов, отправку с retry и обновление статуса.
 type NotificationService struct {
-	repo    Repository
-	limiter RateLimiter
-	senders map[model.Channel]Sender
-	pub     Publisher
+	repo     Repository
+	limiter  RateLimiter
+	senders  map[model.Channel]Sender
+	pub      Publisher
+	retryCfg retry.Config
 }
 
 // New создаёт новый NotificationService с указанными зависимостями.
@@ -48,6 +51,12 @@ func New(repo Repository, limiter RateLimiter, pub Publisher) *NotificationServi
 		senders: make(map[model.Channel]Sender),
 		pub:     pub,
 	}
+}
+
+// SetRetryConfig устанавливает конфигурацию повторных попыток отправки.
+// Если не вызван, отправка выполняется однократно.
+func (s *NotificationService) SetRetryConfig(cfg retry.Config) {
+	s.retryCfg = cfg
 }
 
 // RegisterSender регистрирует отправщик для указанного канала доставки.
@@ -68,8 +77,41 @@ func (s *NotificationService) Send(ctx context.Context, n *model.Notification) e
 	return nil
 }
 
+// SendAll выполняет fan-out: создаёт уведомление для каждого канала
+// и отправляет их параллельно. Возвращает список ID созданных уведомлений.
+func (s *NotificationService) SendAll(ctx context.Context, userID string, channels []model.Channel, payload string) ([]string, error) {
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		ids      []string
+		firstErr error
+	)
+
+	for _, ch := range channels {
+		wg.Add(1)
+		go func(ch model.Channel) {
+			defer wg.Done()
+			n := model.NewNotification(userID, ch, payload)
+			if err := s.Send(ctx, n); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+				return
+			}
+			mu.Lock()
+			ids = append(ids, n.ID)
+			mu.Unlock()
+		}(ch)
+	}
+
+	wg.Wait()
+	return ids, firstErr
+}
+
 // ProcessNotification обрабатывает уведомление из очереди:
-// проверка rate limit → отправка через sender → обновление статуса.
+// проверка rate limit → отправка через sender с retry → обновление статуса.
 func (s *NotificationService) ProcessNotification(ctx context.Context, n *model.Notification) {
 	allowed, err := s.limiter.Allow(ctx, n.UserID)
 	if err != nil {
@@ -87,7 +129,17 @@ func (s *NotificationService) ProcessNotification(ctx context.Context, n *model.
 		return
 	}
 
-	if err := sndr.Send(ctx, n); err != nil {
+	sendFn := func(ctx context.Context) error {
+		return sndr.Send(ctx, n)
+	}
+
+	if s.retryCfg.MaxAttempts > 1 {
+		err = retry.Do(ctx, s.retryCfg, sendFn)
+	} else {
+		err = sendFn(ctx)
+	}
+
+	if err != nil {
 		_ = s.repo.UpdateStatus(ctx, n.ID, model.StatusFailed, err.Error())
 		return
 	}

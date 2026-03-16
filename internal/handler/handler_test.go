@@ -16,15 +16,23 @@ import (
 
 // mockService имитирует сервис уведомлений для тестов.
 type mockService struct {
-	sendCalled bool
-	sendErr    error
-	getResult  *model.Notification
-	getErr     error
+	sendCalled    bool
+	sendErr       error
+	sendAllCalled bool
+	sendAllIDs    []string
+	sendAllErr    error
+	getResult     *model.Notification
+	getErr        error
 }
 
 func (m *mockService) Send(ctx context.Context, n *model.Notification) error {
 	m.sendCalled = true
 	return m.sendErr
+}
+
+func (m *mockService) SendAll(ctx context.Context, userID string, channels []model.Channel, payload string) ([]string, error) {
+	m.sendAllCalled = true
+	return m.sendAllIDs, m.sendAllErr
 }
 
 func (m *mockService) GetByID(ctx context.Context, id string) (*model.Notification, error) {
@@ -122,6 +130,26 @@ func TestGetNotification_NotFound(t *testing.T) {
 	h.GetNotification(w, req, "nonexistent")
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// TestCreateNotification_FanOut проверяет fan-out отправку в несколько каналов.
+func TestCreateNotification_FanOut(t *testing.T) {
+	svc := &mockService{sendAllIDs: []string{"id-1", "id-2", "id-3"}}
+	h := New(svc)
+
+	body := `{"user_id":"user:1","channels":["email","push","sms"],"payload":"fan-out"}`
+	req := httptest.NewRequest(http.MethodPost, "/notifications", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	h.CreateNotification(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code)
+	assert.True(t, svc.sendAllCalled)
+
+	var resp map[string][]string
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Len(t, resp["ids"], 3)
 }
 
 // TestCreateNotification_ResponseContainsID проверяет, что ответ содержит ID созданного уведомления.
