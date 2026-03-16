@@ -23,14 +23,18 @@ func TestLoad_Defaults(t *testing.T) {
 // TestLoad_FromEnv проверяет, что Load корректно читает все параметры из переменных окружения.
 func TestLoad_FromEnv(t *testing.T) {
 	envs := map[string]string{
-		"SERVER_ADDR":	":9090",
-		"POSTGRES_DSN":	"postgres://user:pass@db:5432/test?sslmode=disable",
-		"RABBITMQ_URL": "amqp://guest:guest@rabbitmq:5672/",
-		"REDIS_ADDR":	"redis:6379",
-		"WORKER_POOL_SIZE":	"20",
-		"WORKER_QUEUE_SIZE": "200",
+		"SERVER_ADDR":        ":9090",
+		"DB_HOST":            "db",
+		"DB_PORT":            "5432",
+		"DB_USER":            "user",
+		"DB_PASSWORD":        "pass",
+		"DB_NAME":            "test",
+		"RABBITMQ_URL":       "amqp://guest:guest@rabbitmq:5672/",
+		"REDIS_ADDR":         "redis:6379",
+		"WORKER_POOL_SIZE":   "20",
+		"WORKER_QUEUE_SIZE":  "200",
 		"RATE_LIMIT_RPS":     "50",
-		"RETRY_MAX_ATTEMPTS": "5", 
+		"RETRY_MAX_ATTEMPTS": "5",
 	}
 	
 	for k, v := range envs {
@@ -47,7 +51,7 @@ func TestLoad_FromEnv(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, ":9090", cfg.Server.Addr)
-	assert.Equal(t, "postgres://user:pass@db:5432/test?sslmode=disable", cfg.Postgres.DSN)
+	assert.Equal(t, "postgres://user:pass@db:5432/test?sslmode=disable", cfg.Postgres.DSN())
 	assert.Equal(t, "amqp://guest:guest@rabbitmq:5672/", cfg.RabbitMQ.URL)
 	assert.Equal(t, "redis:6379", cfg.Redis.Addr)
 	assert.Equal(t, 20, cfg.Worker.PoolSize)

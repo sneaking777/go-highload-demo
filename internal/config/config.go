@@ -25,7 +25,20 @@ type ServerConfig struct {
 
 // PostgresConfig задаёт параметры подключения к PostgreSQL.
 type PostgresConfig struct {
-	DSN string
+	Host     string
+	Port     string
+	User     string
+	Password string
+	DBName   string
+}
+
+// DSN формирует строку подключения к PostgreSQL.
+func (p PostgresConfig) DSN() string {
+	if p.Host == "" {
+		return ""
+	}
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
+		p.User, p.Password, p.Host, p.Port, p.DBName)
 }
 
 // RabbitMQConfig задаёт параметры подключения к RabbitMQ.
@@ -58,7 +71,13 @@ type RetryConfig struct {
 func Load() (*Config, error) {
 	cfg := &Config{
 		Server: ServerConfig{Addr: envOrDefault("SERVER_ADDR", ":8080")},
-		Postgres: PostgresConfig{DSN: envOrDefault("POSTGRES_DSN", "")},
+		Postgres: PostgresConfig{
+			Host:     envOrDefault("DB_HOST", ""),
+			Port:     envOrDefault("DB_PORT", "5432"),
+			User:     envOrDefault("DB_USER", "notify"),
+			Password: envOrDefault("DB_PASSWORD", ""),
+			DBName:   envOrDefault("DB_NAME", "notifications"),
+		},
 		RabbitMQ: RabbitMQConfig{URL: envOrDefault("RABBITMQ_URL", "")},
 		Redis: RedisConfig{Addr: envOrDefault("REDIS_ADDR", "")},
 	}
