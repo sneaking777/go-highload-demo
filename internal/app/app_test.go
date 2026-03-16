@@ -92,6 +92,41 @@ func TestInvalidJSON(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
+func TestHealthEndpoint(t *testing.T) {
+	_, addr := startTestApp(t)
+
+	resp, err := http.Get("http://" + addr + "/health")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result map[string]string
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	assert.Equal(t, "ok", result["status"])
+}
+
+func TestReadyEndpoint(t *testing.T) {
+	_, addr := startTestApp(t)
+
+	resp, err := http.Get("http://" + addr + "/ready")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result map[string]string
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	assert.Equal(t, "ok", result["status"])
+}
+
+func TestPprofEndpoint(t *testing.T) {
+	_, addr := startTestApp(t)
+
+	resp, err := http.Get("http://" + addr + "/debug/pprof/")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
 func TestGracefulShutdown(t *testing.T) {
 	a, addr := startTestApp(t)
 

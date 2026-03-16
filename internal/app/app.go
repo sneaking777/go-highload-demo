@@ -3,8 +3,10 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"sync"
 
 	"github.com/go-highload-demo/internal/config"
@@ -41,6 +43,23 @@ func New(cfg *config.Config, repo service.Repository, limiter service.RateLimite
 		id := r.PathValue("id")
 		h.GetNotification(w, r, id)
 	})
+
+	// Health check эндпоинты
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	})
+	mux.HandleFunc("GET /ready", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	})
+
+	// pprof эндпоинты для профилирования
+	mux.HandleFunc("GET /debug/pprof/", pprof.Index)
+	mux.HandleFunc("GET /debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
 
 	return &App{
 		cfg: cfg,
