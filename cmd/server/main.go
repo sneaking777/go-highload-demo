@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-highload-demo/internal/app"
+	"github.com/go-highload-demo/internal/broker"
 	"github.com/go-highload-demo/internal/config"
 	"github.com/go-highload-demo/internal/repository"
 	"github.com/go-highload-demo/internal/service"
@@ -44,7 +45,12 @@ func main() {
 		defer closeRedis()
 	}
 
-	a := app.New(cfg, repo, limiter)
+	brk, closeBroker := initBroker(cfg)
+	if closeBroker != nil {
+		defer closeBroker()
+	}
+
+	a := app.New(cfg, repo, limiter, brk)
 	addr, err := a.Start()
 	if err != nil {
 		log.Fatalf("start: %v", err)
@@ -102,4 +108,20 @@ func initLimiter(ctx context.Context, cfg *config.Config) (service.RateLimiter, 
 
 	limiter := ratelimiter.New(adapter, int64(cfg.RateLimit.RPS), time.Second)
 	return limiter, func() { adapter.Close() }
+}
+
+// initBroker создаёт брокер: RabbitMQ если RABBITMQ_URL задан, иначе LocalBroker.
+func initBroker(cfg *config.Config) (broker.Broker, func()) {
+	if cfg.RabbitMQ.URL == "" {
+		log.Println("RABBITMQ_URL not set, using local worker pool")
+		return broker.NewLocalBroker(cfg.Worker.PoolSize, cfg.Worker.QueueSize), nil
+	}
+
+	rmq, err := broker.NewRabbitMQBroker(cfg.RabbitMQ.URL)
+	if err != nil {
+		log.Fatalf("rabbitmq: %v", err)
+	}
+	log.Println("rabbitmq connected, durable queue with DLQ")
+
+	return rmq, func() { rmq.Shutdown() }
 }

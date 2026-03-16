@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/go-highload-demo/internal/app"
+	"github.com/go-highload-demo/internal/broker"
 	"github.com/go-highload-demo/internal/config"
 	"github.com/go-highload-demo/internal/repository"
 	"github.com/go-highload-demo/internal/storage"
@@ -33,7 +34,8 @@ func startTestApp(t *testing.T) (*app.App, string) {
 	store := storage.NewMemoryStore()
 	repo := repository.New(store)
 
-	a := app.New(cfg, repo, &noopLimiter{})
+	brk := broker.NewLocalBroker(cfg.Worker.PoolSize, cfg.Worker.QueueSize)
+	a := app.New(cfg, repo, &noopLimiter{}, brk)
 	addr, err := a.Start()
 	require.NoError(t, err)
 

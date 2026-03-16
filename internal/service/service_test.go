@@ -5,7 +5,6 @@ import (
 	"errors"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/go-highload-demo/internal/model"
 	"github.com/stretchr/testify/assert"
@@ -108,138 +107,142 @@ func (m *mockRateLimiter) Allow(ctx context.Context, key string) (bool, error) {
 	return m.allowed, m.err
 }
 
-// --- Тесты Send (синхронная часть: save + submit) ---
+// mockPublisher имитирует брокер для тестов.
+type mockPublisher struct {
+	published []*model.Notification
+	err       error
+}
 
-// TestSend_SavesAndSubmits проверяет, что Send сохраняет уведомление и кладёт задачу в очередь.
-func TestSend_SavesAndSubmits(t *testing.T) {
+func (m *mockPublisher) Publish(ctx context.Context, n *model.Notification) error {
+	if m.err != nil {
+		return m.err
+	}
+	m.published = append(m.published, n)
+	return nil
+}
+
+// --- Тесты Send (save + publish) ---
+
+// TestSend_SavesAndPublishes проверяет, что Send сохраняет уведомление и публикует в очередь.
+func TestSend_SavesAndPublishes(t *testing.T) {
 	repo := newMockRepository()
-	sndr := &mockSender{}
-	limiter := &mockRateLimiter{allowed: true}
-	svc := New(repo, limiter, 1, 10)
-	svc.RegisterSender(model.ChannelEmail, sndr)
-	// Не запускаем pool — задачи остаются в очереди
+	pub := &mockPublisher{}
+	svc := New(repo, &mockRateLimiter{allowed: true}, pub)
 
 	n := model.NewNotification("user:1", model.ChannelEmail, "hello")
 	err := svc.Send(context.Background(), n)
 
 	require.NoError(t, err)
 	assert.Equal(t, model.StatusPending, repo.getStatus(n.ID))
+	assert.Len(t, pub.published, 1)
 }
 
 // TestSend_SaveError проверяет проброс ошибки при сбое сохранения.
 func TestSend_SaveError(t *testing.T) {
 	repo := newMockRepository()
 	repo.saveErr = errors.New("db down")
-	limiter := &mockRateLimiter{allowed: true}
-	svc := New(repo, limiter, 1, 10)
+	pub := &mockPublisher{}
+	svc := New(repo, &mockRateLimiter{allowed: true}, pub)
 
 	n := model.NewNotification("user:1", model.ChannelEmail, "hello")
 	err := svc.Send(context.Background(), n)
 
 	assert.Error(t, err)
+	assert.Empty(t, pub.published)
 }
 
-// --- Тесты Process (асинхронная обработка воркером) ---
+// TestSend_PublishError проверяет проброс ошибки при сбое публикации.
+func TestSend_PublishError(t *testing.T) {
+	repo := newMockRepository()
+	pub := &mockPublisher{err: errors.New("broker down")}
+	svc := New(repo, &mockRateLimiter{allowed: true}, pub)
 
-// TestProcess_Success проверяет, что воркер обрабатывает задачу: отправляет и ставит статус sent.
+	n := model.NewNotification("user:1", model.ChannelEmail, "hello")
+	err := svc.Send(context.Background(), n)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "publish")
+}
+
+// --- Тесты ProcessNotification (синхронная обработка) ---
+
+// TestProcess_Success проверяет успешную обработку: отправка + статус sent.
 func TestProcess_Success(t *testing.T) {
 	repo := newMockRepository()
 	sndr := &mockSender{}
-	limiter := &mockRateLimiter{allowed: true}
-	svc := New(repo, limiter, 1, 10)
+	svc := New(repo, &mockRateLimiter{allowed: true}, &mockPublisher{})
 	svc.RegisterSender(model.ChannelEmail, sndr)
 
 	ctx := context.Background()
-	svc.Start(ctx)
-	defer svc.Stop()
-
 	n := model.NewNotification("user:1", model.ChannelEmail, "hello")
-	require.NoError(t, svc.Send(ctx, n))
+	_ = repo.Save(ctx, n)
 
-	assert.Eventually(t, func() bool {
-		return repo.getStatus(n.ID) == model.StatusSent
-	}, time.Second, 10*time.Millisecond)
+	svc.ProcessNotification(ctx, n)
+
+	assert.Equal(t, model.StatusSent, repo.getStatus(n.ID))
 	assert.Equal(t, 1, sndr.sentCount())
 }
 
-// TestProcess_RateLimited проверяет, что воркер ставит статус failed при превышении лимита.
+// TestProcess_RateLimited проверяет, что при превышении лимита статус — failed.
 func TestProcess_RateLimited(t *testing.T) {
 	repo := newMockRepository()
-	limiter := &mockRateLimiter{allowed: false}
-	svc := New(repo, limiter, 1, 10)
+	svc := New(repo, &mockRateLimiter{allowed: false}, &mockPublisher{})
 	svc.RegisterSender(model.ChannelEmail, &mockSender{})
 
 	ctx := context.Background()
-	svc.Start(ctx)
-	defer svc.Stop()
-
 	n := model.NewNotification("user:1", model.ChannelEmail, "hello")
-	_ = svc.Send(ctx, n)
+	_ = repo.Save(ctx, n)
 
-	assert.Eventually(t, func() bool {
-		return repo.getStatus(n.ID) == model.StatusFailed
-	}, time.Second, 10*time.Millisecond)
+	svc.ProcessNotification(ctx, n)
+
+	assert.Equal(t, model.StatusFailed, repo.getStatus(n.ID))
 }
 
-// TestProcess_SenderNotFound проверяет, что воркер ставит failed при отсутствии отправщика.
+// TestProcess_SenderNotFound проверяет ошибку при отсутствии отправщика.
 func TestProcess_SenderNotFound(t *testing.T) {
 	repo := newMockRepository()
-	limiter := &mockRateLimiter{allowed: true}
-	svc := New(repo, limiter, 1, 10)
+	svc := New(repo, &mockRateLimiter{allowed: true}, &mockPublisher{})
 	// не регистрируем sender
 
 	ctx := context.Background()
-	svc.Start(ctx)
-	defer svc.Stop()
-
 	n := model.NewNotification("user:1", model.ChannelEmail, "hello")
-	_ = svc.Send(ctx, n)
+	_ = repo.Save(ctx, n)
 
-	assert.Eventually(t, func() bool {
-		return repo.getStatus(n.ID) == model.StatusFailed
-	}, time.Second, 10*time.Millisecond)
+	svc.ProcessNotification(ctx, n)
+
+	assert.Equal(t, model.StatusFailed, repo.getStatus(n.ID))
 }
 
-// TestProcess_SenderError проверяет, что при ошибке отправки воркер ставит failed и сохраняет ошибку.
+// TestProcess_SenderError проверяет, что при ошибке отправки статус — failed с сообщением.
 func TestProcess_SenderError(t *testing.T) {
 	repo := newMockRepository()
 	sndr := &mockSender{err: errors.New("connection timeout")}
-	limiter := &mockRateLimiter{allowed: true}
-	svc := New(repo, limiter, 1, 10)
+	svc := New(repo, &mockRateLimiter{allowed: true}, &mockPublisher{})
 	svc.RegisterSender(model.ChannelPush, sndr)
 
 	ctx := context.Background()
-	svc.Start(ctx)
-	defer svc.Stop()
-
 	n := model.NewNotification("user:1", model.ChannelPush, "hello")
-	_ = svc.Send(ctx, n)
+	_ = repo.Save(ctx, n)
 
-	assert.Eventually(t, func() bool {
-		return repo.getStatus(n.ID) == model.StatusFailed
-	}, time.Second, 10*time.Millisecond)
-	assert.Eventually(t, func() bool {
-		return repo.getLastError(n.ID) == "connection timeout"
-	}, time.Second, 10*time.Millisecond)
+	svc.ProcessNotification(ctx, n)
+
+	assert.Equal(t, model.StatusFailed, repo.getStatus(n.ID))
+	assert.Equal(t, "connection timeout", repo.getLastError(n.ID))
 }
 
-// TestProcess_RateLimiterError проверяет, что при ошибке rate limiter воркер ставит failed.
+// TestProcess_RateLimiterError проверяет, что при ошибке rate limiter статус — failed.
 func TestProcess_RateLimiterError(t *testing.T) {
 	repo := newMockRepository()
-	limiter := &mockRateLimiter{err: errors.New("redis down")}
-	svc := New(repo, limiter, 1, 10)
+	svc := New(repo, &mockRateLimiter{err: errors.New("redis down")}, &mockPublisher{})
 	svc.RegisterSender(model.ChannelEmail, &mockSender{})
 
 	ctx := context.Background()
-	svc.Start(ctx)
-	defer svc.Stop()
-
 	n := model.NewNotification("user:1", model.ChannelEmail, "hello")
-	_ = svc.Send(ctx, n)
+	_ = repo.Save(ctx, n)
 
-	assert.Eventually(t, func() bool {
-		return repo.getStatus(n.ID) == model.StatusFailed
-	}, time.Second, 10*time.Millisecond)
+	svc.ProcessNotification(ctx, n)
+
+	assert.Equal(t, model.StatusFailed, repo.getStatus(n.ID))
 }
 
 // --- Тесты GetByID ---
@@ -247,9 +250,7 @@ func TestProcess_RateLimiterError(t *testing.T) {
 // TestGetByID_Success проверяет получение уведомления по ID.
 func TestGetByID_Success(t *testing.T) {
 	repo := newMockRepository()
-	limiter := &mockRateLimiter{allowed: true}
-	svc := New(repo, limiter, 1, 10)
-	svc.RegisterSender(model.ChannelEmail, &mockSender{})
+	svc := New(repo, &mockRateLimiter{allowed: true}, &mockPublisher{})
 
 	n := model.NewNotification("user:1", model.ChannelEmail, "hello")
 	_ = svc.Send(context.Background(), n)
@@ -262,8 +263,7 @@ func TestGetByID_Success(t *testing.T) {
 // TestGetByID_NotFound проверяет ошибку при запросе несуществующего уведомления.
 func TestGetByID_NotFound(t *testing.T) {
 	repo := newMockRepository()
-	limiter := &mockRateLimiter{allowed: true}
-	svc := New(repo, limiter, 1, 10)
+	svc := New(repo, &mockRateLimiter{allowed: true}, &mockPublisher{})
 
 	_, err := svc.GetByID(context.Background(), "nonexistent")
 	assert.Error(t, err)

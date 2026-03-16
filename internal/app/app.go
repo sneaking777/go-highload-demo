@@ -9,6 +9,7 @@ import (
 	"net/http/pprof"
 	"sync"
 
+	"github.com/go-highload-demo/internal/broker"
 	"github.com/go-highload-demo/internal/config"
 	"github.com/go-highload-demo/internal/handler"
 	"github.com/go-highload-demo/internal/model"
@@ -16,19 +17,20 @@ import (
 	"github.com/go-highload-demo/internal/service"
 )
 
-// App объединяет все компоненты сервиса и управляет HTTP-сервером и worker pool.
+// App объединяет все компоненты сервиса и управляет HTTP-сервером и брокером.
 type App struct {
 	cfg      *config.Config
 	server   *http.Server
 	svc      *service.NotificationService
+	brk      broker.Broker
 	stopOnce sync.Once
 	stopErr  error
 }
 
-// New создаёт новый App, связывая конфигурацию, репозиторий и rate limiter
-// с бизнес-логикой, обработчиками и HTTP-маршрутами.
-func New(cfg *config.Config, repo service.Repository, limiter service.RateLimiter) *App {
-	svc := service.New(repo, limiter, cfg.Worker.PoolSize, cfg.Worker.QueueSize)
+// New создаёт новый App, связывая конфигурацию, репозиторий, rate limiter
+// и брокер с бизнес-логикой, обработчиками и HTTP-маршрутами.
+func New(cfg *config.Config, repo service.Repository, limiter service.RateLimiter, brk broker.Broker) *App {
+	svc := service.New(repo, limiter, brk)
 
 	svc.RegisterSender(model.ChannelEmail, sender.NewEmailSender())
 	svc.RegisterSender(model.ChannelPush, sender.NewPushSender())
@@ -68,12 +70,15 @@ func New(cfg *config.Config, repo service.Repository, limiter service.RateLimite
 			Handler: mux,
 		},
 		svc: svc,
+		brk: brk,
 	}
 }
 
-// Start запускает worker pool и HTTP-сервер в отдельной горутине, возвращает адрес.
+// Start запускает брокер и HTTP-сервер, возвращает адрес.
 func (a *App) Start() (string, error) {
-	a.svc.Start(context.Background())
+	if err := a.brk.Run(context.Background(), a.svc.ProcessNotification); err != nil {
+		return "", err
+	}
 
 	ln, err := net.Listen("tcp", a.cfg.Server.Addr)
 	if err != nil {
@@ -83,12 +88,12 @@ func (a *App) Start() (string, error) {
 	return ln.Addr().String(), nil
 }
 
-// Shutdown выполняет graceful shutdown HTTP-сервера и worker pool.
+// Shutdown выполняет graceful shutdown HTTP-сервера и брокера.
 // Безопасен для повторного вызова.
 func (a *App) Shutdown(ctx context.Context) error {
 	a.stopOnce.Do(func() {
 		a.stopErr = a.server.Shutdown(ctx)
-		a.svc.Stop()
+		a.brk.Shutdown()
 	})
 	return a.stopErr
 }
