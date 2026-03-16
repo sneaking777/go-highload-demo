@@ -53,6 +53,17 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
-      retries: 5      
+      retries: 5
+  k6:
+    image: grafana/k6:latest
+    volumes:
+      - ./scripts:/scripts
+    environment:
+      - BASE_URL=http://app:8080
+    depends_on:
+      app:
+        condition: service_started
+    profiles:
+      - test
 volumes:
   pgdata:                                
