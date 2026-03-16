@@ -20,18 +20,19 @@ import (
 // noopLimiter — rate limiter, который всегда разрешает (для тестов).
 type noopLimiter struct{}
 
-func (n *noopLimiter) Allow(_ context.Context, _ string) (bool, error)  {
+func (n *noopLimiter) Allow(_ context.Context, _ string) (bool, error) {
 	return true, nil
 }
 
-func startTestApp(t *testing.T) (*app.App, string)  {
+func startTestApp(t *testing.T) (*app.App, string) {
 	t.Helper()
 	cfg := &config.Config{
 		Server: config.ServerConfig{Addr: ":0"},
+		Worker: config.WorkerConfig{PoolSize: 2, QueueSize: 10},
 	}
 	store := storage.NewMemoryStore()
 	repo := repository.New(store)
-	
+
 	a := app.New(cfg, repo, &noopLimiter{})
 	addr, err := a.Start()
 	require.NoError(t, err)
@@ -45,11 +46,10 @@ func startTestApp(t *testing.T) (*app.App, string)  {
 	return a, addr
 }
 
-
 func TestCreateAndGetNotification(t *testing.T) {
 	_, addr := startTestApp(t)
 
-    // POST /notifications — создаём уведомление	
+	// POST /notifications — создаём уведомление
 	body := `{"user_id":"user1","channel":"email","payload":"hello"}`
 	resp, err := http.Post("http://"+addr+"/notifications", "application/json", bytes.NewBufferString(body))
 	require.NoError(t, err)
@@ -61,44 +61,45 @@ func TestCreateAndGetNotification(t *testing.T) {
 	id := result["id"]
 	assert.NotEmpty(t, id)
 
-	// GET /notifications/{id} — получаем созданное
-	resp2, err := http.Get("http://" + addr + "/notifications/" + id)
-	require.NoError(t, err)
-	defer resp2.Body.Close()
-	assert.Equal(t, http.StatusOK, resp2.StatusCode)
-
-	var notification map[string]interface{}
-	require.NoError(t, json.NewDecoder(resp2.Body).Decode(&notification))
-	assert.Equal(t, id, notification["id"])
-	assert.Equal(t, "sent", notification["status"])
+	// GET /notifications/{id} — ждём async-обработки, проверяем статус sent
+	require.Eventually(t, func() bool {
+		r, err := http.Get("http://" + addr + "/notifications/" + id)
+		if err != nil {
+			return false
+		}
+		defer r.Body.Close()
+		var n map[string]any
+		json.NewDecoder(r.Body).Decode(&n)
+		return n["status"] == "sent"
+	}, 2*time.Second, 50*time.Millisecond)
 }
 
-func TestNotificationNotFound(t *testing.T)  {
+func TestNotificationNotFound(t *testing.T) {
 	_, addr := startTestApp(t)
-	
+
 	resp, err := http.Get("http://" + addr + "/notifications/nonexistent")
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
-func TestInvalidJSON(t *testing.T)  {
+func TestInvalidJSON(t *testing.T) {
 	_, addr := startTestApp(t)
 
 	resp, err := http.Post("http://"+addr+"/notifications", "application/json", bytes.NewBufferString("{invalid"))
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)	
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
-func TestGracefulShutdown(t *testing.T)  {
+func TestGracefulShutdown(t *testing.T) {
 	a, addr := startTestApp(t)
-	
+
 	// Сервер обслуживает запросы
-    resp, err := http.Get("http://" + addr + "/notifications/test")
+	resp, err := http.Get("http://" + addr + "/notifications/test")
 	require.NoError(t, err)
 	resp.Body.Close()
-	
+
 	// Корректное завершение
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
